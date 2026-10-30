@@ -27,6 +27,9 @@ class OnlineTetris {
     StateMatchmaking = "Matchmaking";
     StateOpponentDisconnect = "OpponentDisconnect";
 
+    // States where the emulated Game Boy may be reset or swapped (no lobby open)
+    EmulatorFreeStates = ["Connect", "Connecting", "ConnectingTetris", "SelectMusic", "ModeSelect", "SelectHandicap", "StateError"];
+
     // Player states (sync with server)
     STATE_ALIVE = 0;
     STATE_DEAD = 1;
@@ -45,6 +48,8 @@ class OnlineTetris {
         this.isMatchmaking = false;
         this.serial = null;
         this.gb = null;
+        this.emulator = null; // in-page Game Boy (js/emulator/EmulatorPanel.js), once opened
+        this.handshakeRun = 0;
 
         // Queue for win/lose commands and 0x43 screen-fill
         this.winLoseQueue = [];
@@ -64,12 +69,6 @@ class OnlineTetris {
     }
 
     init() {
-        // Need either WebUSB (Chrome/Edge) or WebSerial (Firefox 151+, Chrome, Edge)
-        if (!navigator.usb && !navigator.serial) {
-            this.showScreen('screen-no-webusb');
-            return;
-        }
-
         // Load saved username or generate a random one
         var savedName = localStorage.getItem('tetris_username');
         document.getElementById('username').value = savedName || this.generateName();
@@ -109,8 +108,14 @@ class OnlineTetris {
             connectBtn.textContent = transport === 'usb' ? 'Connect USB' : 'Connect Serial';
             connectBtn.addEventListener('click', () => this.handleConnectClick(transport));
         } else {
-            connectBtn.disabled = true;
+            // Neither WebUSB (Chrome/Edge) nor WebSerial (Firefox 151+, Chrome, Edge): the emulator still works
+            connectBtn.style.display = 'none';
+            document.getElementById('connect-instructions').textContent =
+                'This browser can\'t use the USB adapter (Chrome, Edge or Firefox 151 and later can).';
+            document.getElementById('emu-offer-text').textContent = 'You can still play Tetris in your browser with your own ROM.';
         }
+
+        document.getElementById('btn-emulator').addEventListener('click', () => this.handleEmulatorClick());
 
         // Music buttons
         document.getElementById('btn-music-a').addEventListener('click', () => this.setMusic(this.SONG_A));
@@ -247,6 +252,7 @@ class OnlineTetris {
     // Set state and update UI
     setState(newState) {
         this.currentState = newState;
+        if (this.emulator) this.emulator.setLocked(!this.EmulatorFreeStates.includes(newState));
         this.updateUI();
     }
 
@@ -380,13 +386,71 @@ class OnlineTetris {
         });
     }
 
-    attemptTetrisConnection() {
+    // In-page emulator: the player's own Tetris ROM instead of a Game Boy on the adapter
+    handleEmulatorClick() {
+        if (this.emulator) {
+            this.emulator.open();
+            return;
+        }
+        const button = document.getElementById('btn-emulator');
+        button.disabled = true;
+        import('./emulator/EmulatorPanel.js').then(({ EmulatorPanel }) => {
+            this.emulator = new EmulatorPanel(document.getElementById('emu-host'), {
+                game: { name: 'Tetris', files: '.gb or .gbc', identify: identifyTetris },
+                emulatorUrl: 'emulator/',
+                workletUrl: 'js/emulator/audio-worklet.js',
+                storeName: 'gblink-tetris-emulator',
+                buttonClass: 'btn btn-secondary',
+                onStart: (serial, info) => this.handleEmulatorStart(serial, info),
+                onClose: () => this.handleEmulatorClose(),
+            });
+            this.emulator.setLocked(!this.EmulatorFreeStates.includes(this.currentState));
+            return this.emulator.open();
+        }).catch(e => {
+            console.error('Emulator unavailable:', e);
+            document.getElementById('emu-offer-text').textContent = 'The emulator could not be loaded in this browser.';
+        }).finally(() => {
+            button.disabled = false;
+        });
+    }
+
+    // A game is running in the emulator (or was just reset): link to it like a newly connected Game Boy.
+    // Tetris DX links differently; js/dx/TetrisDxSerial.js makes it look like the original.
+    handleEmulatorStart(serial, info) {
+        if (this.serial && this.serial.host) this.serial.close();
+        this.hasPlayedBefore = false;
+        document.getElementById('connecting-dx').style.display = info.dx ? 'block' : 'none';
+        document.getElementById('connecting-gb').style.display = info.dx ? 'none' : 'block';
+        const linked = (transport) => {
+            this.serial = transport;
+            this.setState(this.StateConnectingTetris);
+            this.attemptTetrisConnection();
+        };
+        if (!info.dx) {
+            linked(serial);
+            return;
+        }
+        import('./dx/TetrisDxSerial.js').then(({ TetrisDxSerial }) => {
+            linked(new TetrisDxSerial(this.emulator.emulator));
+        });
+    }
+
+    handleEmulatorClose() {
+        this.handshakeRun++;
+        this.stopSerialPump();
+        if (this.serial && this.serial.host) this.serial.close();
+        this.serial = null;
+        this.setState(this.StateConnect);
+    }
+
+    attemptTetrisConnection(run = ++this.handshakeRun) {
         console.log("Attempt connection...");
         // Returning to the menu/handshake: stop the in-game pump so it can't
         // send concurrently with the menu's own send/read handshake below.
         this.stopSerialPump();
         this.serial.sendHex("29");
         this.serial.readHex(64).then(result => {
+            if (run !== this.handshakeRun) return;
             if (result === "55") {
                 console.log("SUCCESS!");
                 this.setState(this.StateSelectMusic);
@@ -394,11 +458,12 @@ class OnlineTetris {
             } else {
                 console.log("Fail");
                 setTimeout(() => {
-                    this.attemptTetrisConnection();
+                    if (run === this.handshakeRun) this.attemptTetrisConnection(run);
                 }, 100);
             }
         },
             error => {
+                if (run !== this.handshakeRun) return;
                 this.currentState = this.StateError;
                 document.getElementById('error-message').textContent = error;
                 this.updateUI();
@@ -1066,6 +1131,15 @@ class OnlineTetris {
             }
         }, 1000);
     }
+}
+
+// Tetris (World and Japan) and Tetris DX from the ROM header
+function identifyTetris(rom) {
+    const title = String.fromCharCode(...rom.subarray(0x134, 0x144)).replace(/\0+$/, '');
+    if (title.startsWith('TETRIS DX')) return { title: 'Tetris DX', dx: true };
+    if (title !== 'TETRIS') return null;
+    const checksum = (rom[0x14E] << 8) | rom[0x14F];
+    return { title: checksum === 0x89B5 ? 'Tetris (Japan)' : 'Tetris' };
 }
 
 // Initialize application when DOM is ready

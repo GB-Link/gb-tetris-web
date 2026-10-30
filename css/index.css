@@ -198,3 +198,50 @@ body {
   background-color: #444;
   height: 100%;
 }
+
+/*
+ * In-page emulator (css/emulator.css): the game beside the menus on wide
+ * screens, above them on narrow ones
+ */
+.emu-offer {
+  margin-top: 1.5rem;
+}
+
+.emu-offer p {
+  margin-bottom: .5rem;
+}
+
+.emu-waiting {
+  display: none;
+}
+
+body.gbemu-active .connect-hardware,
+body.gbemu-active .emu-offer {
+  display: none;
+}
+
+body.gbemu-active .emu-waiting {
+  display: block;
+}
+
+body.gbemu-active .cover-container {
+  max-width: 1140px;
+}
+
+.emu-host .gbemu {
+  max-width: 520px;
+  margin: 0 auto 2rem;
+}
+
+@media (min-width: 992px) {
+  body.gbemu-active .play-area {
+    display: grid;
+    grid-template-columns: minmax(0, 520px) minmax(0, 1fr);
+    gap: 2.5rem;
+    align-items: start;
+  }
+
+  .emu-host .gbemu {
+    margin-bottom: 0;
+  }
+}
