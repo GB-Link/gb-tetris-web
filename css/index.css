@@ -199,6 +199,52 @@ body {
   height: 100%;
 }
 
+/* Supported games on the connect screen */
+.supported-games {
+  list-style: none;
+  padding: 0;
+  margin-bottom: 1rem;
+}
+
+.supported-games li {
+  display: inline-block;
+  margin: 0 .5rem;
+  font-weight: 700;
+}
+
+/* Lobby for games played in their own 2-player mode */
+.linked-players {
+  list-style: none;
+  padding: 0;
+  font-weight: 700;
+}
+
+.linked-status {
+  font-size: 1.25rem;
+  margin-top: 1rem;
+}
+
+#linked-again {
+  margin-right: 10px;
+}
+
+/* Setup controls: the row Tetris 2 changes on the Game Boy, and the music */
+.linked-controls {
+  margin-bottom: 1.5rem;
+}
+
+.linked-rows {
+  margin-bottom: 1rem;
+}
+
+.linked-rows .btn {
+  min-width: 100px;
+}
+
+#linked-music .musicButton {
+  margin-bottom: 10px;
+}
+
 /*
  * In-page emulator (css/emulator.css): the game beside the menus on wide
  * screens, above them on narrow ones

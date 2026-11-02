@@ -39,6 +39,8 @@ static int audioRate = 48000;
 static void* saveCopy = NULL;
 static size_t saveCopySize = 0;
 static bool preferSgb = false;
+/* Model for the next game; NULL lets the cartridge decide */
+static const char* forcedModel = NULL;
 static bool sgbBorder = false;
 /* Border of a Game Boy Color game that also supports the Super Game Boy, drawn
  * around its own screen: 0 not captured yet, 1 captured, -1 none */
@@ -326,7 +328,11 @@ EMSCRIPTEN_KEEPALIVE int emu_load(void* rom, size_t romSize, const void* save, s
 	core->init(core);
 	mCoreConfigSetDefaultValue(&core->config, "idleOptimization", "ignore");
 	mCoreConfigSetDefaultIntValue(&core->config, "sgb.borders", sgbBorder);
-	if (preferSgb) {
+	if (forcedModel) {
+		mCoreConfigSetDefaultValue(&core->config, "gb.model", forcedModel);
+		mCoreConfigSetDefaultValue(&core->config, "sgb.model", forcedModel);
+		mCoreConfigSetDefaultValue(&core->config, "cgb.model", forcedModel);
+	} else if (preferSgb) {
 		/* Games that also run on a Game Boy Color start as on a Super Game Boy */
 		mCoreConfigSetDefaultValue(&core->config, "cgb.sgbModel", "SGB");
 	}
@@ -371,6 +377,13 @@ EMSCRIPTEN_KEEPALIVE void emu_reset(void) {
 /* Applies from the next emu_load. */
 EMSCRIPTEN_KEEPALIVE void emu_set_prefer_sgb(int on) {
 	preferSgb = on != 0;
+}
+
+/* Model for the next emu_load: 0 from the cartridge, 1 Game Boy, 2 Game Boy Color,
+ * 3 Super Game Boy */
+EMSCRIPTEN_KEEPALIVE void emu_set_model(int model) {
+	static const char* const names[] = { NULL, "DMG", "CGB", "SGB" };
+	forcedModel = model > 0 && model < 4 ? names[model] : NULL;
 }
 
 EMSCRIPTEN_KEEPALIVE void emu_set_sgb_border(int on) {

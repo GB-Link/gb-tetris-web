@@ -33,8 +33,10 @@ class GBWebsocket {
     GAME_STATE_ERROR = 9998
     GAME_STATE_NONE = 9999
 
-    constructor(url, name) {
+    // game: what the player plays; the server only matches players of the same game
+    constructor(url, name, game) {
         console.log('url', url);
+        this.game = game;
         this.ws = new WebSocket(url);
         this.ws.onmessage = (function (event) {
             console.log(this);
@@ -105,6 +107,9 @@ class GBWebsocket {
         this.oncountdownstarted = function (gb, seconds) {
             console.log("Countdown started not implemented!")
         }
+
+        this.onrelay = function (gb, data) {
+        }
         console.log(this.ongameupdate);
 
         this.admin = false;
@@ -113,14 +118,14 @@ class GBWebsocket {
         this.game_status = this.GAME_STATE_NONE;
         this.users = []
         this.uuid = ""
+        this.relay = false; // the server can relay games other than Tetris
         this.waitForConnection();
     }
 
     sendRegisterMessage() {
-        this.ws.send(JSON.stringify({
-            "type": "register",
-            "name": this.name
-        }));
+        const register = { "type": "register", "name": this.name, "game": this.game };
+        this.ws.send(JSON.stringify(register));
+        this.registered = true;
     }
 
     getOtherUsers() {
@@ -173,6 +178,10 @@ class GBWebsocket {
         }))
     }
 
+    sendRelay(data) {
+        if (this.registered && this.ws.readyState === 1) this.ws.send(JSON.stringify({ "type": "relay", "data": data }));
+    }
+
     sendReadyNext() {
         this.ws.send(JSON.stringify({ "type": "ready_next" }));
     }
@@ -198,18 +207,18 @@ class GBWebsocket {
         this.ws.send(presetRngForServer);
     }
 
-    static initiateGame(name) {
-        var gb = new GBWebsocket(`wss://${WEBSOCKET_HOST}:${WEBSOCKET_PORT}/create`, name);
+    static initiateGame(name, game) {
+        var gb = new GBWebsocket(`wss://${WEBSOCKET_HOST}:${WEBSOCKET_PORT}/create`, name, game);
         gb.admin = true;
         return gb;
     }
 
-    static joinGame(name, code) {
-        return new GBWebsocket(`wss://${WEBSOCKET_HOST}:${WEBSOCKET_PORT}/join/` + code, name)
+    static joinGame(name, code, game) {
+        return new GBWebsocket(`wss://${WEBSOCKET_HOST}:${WEBSOCKET_PORT}/join/` + code, name, game)
     }
 
-    static findMatch(name) {
-        var gb = new GBWebsocket(`wss://${WEBSOCKET_HOST}:${WEBSOCKET_PORT}/matchmake`, name);
+    static findMatch(name, game) {
+        var gb = new GBWebsocket(`wss://${WEBSOCKET_HOST}:${WEBSOCKET_PORT}/matchmake`, name, game);
         return gb;
     }
 
@@ -222,10 +231,15 @@ class GBWebsocket {
     }
 
     onMessage(event) {
+        var message = JSON.parse(event.data);
+        // Relayed link data arrives many times a second, so it skips the logging below
+        if (message.type === "relay") {
+            this.onrelay(this, message.data);
+            return;
+        }
         console.log("onMessage");
         console.log(event);
         console.log("Parsed message:");
-        var message = JSON.parse(event.data);
         console.log(message);
 
         switch (message.type) {
@@ -235,10 +249,12 @@ class GBWebsocket {
                 this.game_status = message.status;
                 this.users = message.users;
                 this.admin = message.admin_uuid === this.uuid;
+                this.game_kind = message.game || "tetris";
                 this.oninfoupdate(this);
                 break;
             case "user_info":
                 this.uuid = message.uuid;
+                this.relay = message.relay === true;
                 this.onuserinfo(this);
                 break;
             case "garbage":
@@ -261,6 +277,7 @@ class GBWebsocket {
                 console.log("Error!", message.msg)
                 this.game_status = this.GAME_STATE_ERROR;
                 this.errorMessage = message.msg;
+                this.errorGame = message.game || null;
                 this.onerror(this, message.msg);
                 break;
             case "end":

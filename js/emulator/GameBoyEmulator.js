@@ -10,6 +10,7 @@
  */
 
 export const GB_KEYS = { A: 1, B: 2, SELECT: 4, START: 8, RIGHT: 16, LEFT: 32, UP: 64, DOWN: 128 };
+export const GB_MODELS = { AUTO: 0, GB: 1, GBC: 2, SGB: 3 };
 
 // mGBA keeps Game Boy time in units of 2^23 a second (two per clock tick)
 const CYCLES_PER_SECOND = 8388608;
@@ -66,10 +67,12 @@ export class GameBoyEmulator {
     /**
      * Loads a ROM (and battery save). Returns false when the core rejects it.
      * sgb: games that also run on a Game Boy Color start as on a Super Game Boy.
+     * model: GB_MODELS.GBC etc. to force a model instead of the cartridge's choice.
      */
-    load(rom, save = null, { sgb = false } = {}) {
+    load(rom, save = null, { sgb = false, model = GB_MODELS.AUTO } = {}) {
         const m = this.m;
         m._emu_set_prefer_sgb(sgb ? 1 : 0);
+        m._emu_set_model(model);
         const romPtr = m._emu_alloc(rom.length);
         m.HEAPU8.set(rom, romPtr);
         let savePtr = 0;
@@ -200,6 +203,8 @@ export class GameBoyEmulator {
                 return out;
             },
             press: (mask) => this.setKeys('link', mask),
+            // The byte the game has ready to send as follower, or null when it isn't waiting
+            listening: () => ((m._emu_read8(0xFF02) & 0x81) === 0x80 ? m._emu_read8(0xFF01) : null),
         };
     }
 

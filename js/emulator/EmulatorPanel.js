@@ -75,7 +75,7 @@ const TEMPLATE = `
 export class EmulatorPanel {
     /**
      * host: element the panel is built in.
-     * options.game: { name, files (".gb" if left out), identify(rom) -> { title }, { error } or null when it isn't this game }
+     * options.game: { name, files (".gb" if left out), identify(rom) -> { title, model? }, { error } or null when it isn't this game }
      * options.emulatorUrl / workletUrl: where emulator/mgba-gb.* and audio-worklet.js are served
      * options.storeName: this site's IndexedDB name for kept games
      * options.buttonClass: the page's button classes
@@ -403,7 +403,7 @@ export class EmulatorPanel {
         const emu = this.emulator;
         if (this.hasGame) emu.checkSave();
         emu.stop();
-        if (!emu.load(rom, save)) {
+        if (!emu.load(rom, save, { model: info.model })) {
             this.game = null;
             this._showLoader(true);
             this._message('The emulator could not start this ROM.', 'error');

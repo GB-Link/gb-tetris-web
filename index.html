@@ -56,6 +56,12 @@
           <img src="images/animation.gif" class="gameboy" alt="Game Boy" />
           <h2 class="cover-heading">Tetrilink</h2>
           <p class="lead">Connect your Game Boy, boot Tetris, and start playing with your friends!</p>
+          <h4>Supported games</h4>
+          <ul class="supported-games">
+            <li>Tetris</li>
+            <li>Tetris Blast</li>
+            <li>Tetris 2</li>
+          </ul>
           <hr />
           <div class="connect-hardware">
             <h4>Connect your Game Boy</h4>
@@ -118,9 +124,11 @@
               </div>
             </div>
           </div>
-          <hr />
-          <button id="btn-reinit-gameboy" class="btn btn-sm btn-secondary">Reconnect Game Boy</button>
-          <p><small>Use this if you restarted your Game Boy</small></p>
+          <div id="reinit-gameboy">
+            <hr />
+            <button id="btn-reinit-gameboy" class="btn btn-sm btn-secondary">Reconnect Game Boy</button>
+            <p><small>Use this if you restarted your Game Boy</small></p>
+          </div>
         </div>
 
         <!-- Screen: Matchmaking (Finding Opponent) -->
@@ -143,6 +151,42 @@
           <h4>Find another match?</h4>
           <button id="btn-rematch" class="btn btn-lg btn-secondary">Find Match</button>
           <button id="btn-back-to-menu" class="btn btn-lg btn-secondary">Back to Menu</button>
+        </div>
+
+        <!-- Screen: setup for games played in their own 2-player mode (js/link/) -->
+        <div id="screen-linked-setup" class="screen connect">
+          <h2 id="linked-setup-heading"></h2>
+          <p id="linked-setup-status" class="linked-status"></p>
+          <div class="linked-controls-slot">
+            <div id="linked-controls" class="linked-controls">
+              <div id="linked-rows" class="linked-rows">
+                <p><small>Row to change on the Game Boy with LEFT and RIGHT:</small></p>
+                <div class="btn-group" role="group" aria-label="Row to change">
+                  <button id="btn-linked-speed" class="btn btn-secondary">Speed</button>
+                  <button id="btn-linked-round" class="btn btn-secondary">Round</button>
+                </div>
+              </div>
+              <div id="linked-music-picker">
+                <h4>Choose your tunes:</h4>
+                <div id="linked-music"></div>
+              </div>
+            </div>
+          </div>
+          <button id="btn-linked-next" class="btn btn-lg btn-secondary">Next</button>
+        </div>
+
+        <!-- Screen: lobby for games played in their own 2-player mode -->
+        <div id="screen-linked" class="screen connect">
+          <h2 id="linked-heading"></h2>
+          <h4>Players:</h4>
+          <ul id="linked-players" class="linked-players"></ul>
+          <p id="linked-status" class="linked-status"></p>
+          <p id="linked-note"></p>
+          <div class="linked-controls-slot"></div>
+          <button id="btn-linked-start" class="btn btn-lg btn-secondary">Start the match</button>
+          <hr />
+          <button id="linked-again" class="btn btn-lg btn-secondary">Find another match</button>
+          <button id="btn-leave-linked" class="btn btn-sm btn-secondary">Leave Lobby</button>
         </div>
 
         <!-- Screen: Select Game (Create/Join) -->

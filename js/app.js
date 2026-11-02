@@ -26,9 +26,11 @@ class OnlineTetris {
     StateModeSelect = "ModeSelect";
     StateMatchmaking = "Matchmaking";
     StateOpponentDisconnect = "OpponentDisconnect";
+    StateLinkedSetup = "LinkedSetup";
+    StateLinked = "Linked";
 
     // States where the emulated Game Boy may be reset or swapped (no lobby open)
-    EmulatorFreeStates = ["Connect", "Connecting", "ConnectingTetris", "SelectMusic", "ModeSelect", "SelectHandicap", "StateError"];
+    EmulatorFreeStates = ["Connect", "Connecting", "ConnectingTetris", "SelectMusic", "ModeSelect", "SelectHandicap", "StateError", "LinkedSetup", "Linked"];
 
     // Player states (sync with server)
     STATE_ALIVE = 0;
@@ -49,6 +51,8 @@ class OnlineTetris {
         this.serial = null;
         this.gb = null;
         this.emulator = null; // in-page Game Boy (js/emulator/EmulatorPanel.js), once opened
+        this.linked = null; // Tetris Blast, Tetris 2 etc. instead of Tetris (js/link/LinkedGame.js)
+        this.gameKind = 'tetris'; // sent to the server: 'tetris', or 'dx' for Tetris DX
         this.handshakeRun = 0;
 
         // Queue for win/lose commands and 0x43 screen-fill
@@ -179,6 +183,19 @@ class OnlineTetris {
 
         // Reconnect Game Boy button (mode select screen)
         document.getElementById('btn-reinit-gameboy').addEventListener('click', () => this.handleReinitGameboy());
+
+        // Linked games
+        document.getElementById('btn-leave-linked').addEventListener('click', () => {
+            // Left during a match: the setup screen shows when the Game Boy is ready again
+            const playing = !!(this.linked && this.linked.inMatch);
+            if (this.linked) this.linked.close();
+            this.setState(playing ? this.StateLinkedSetup : this.StateModeSelect);
+        });
+        document.getElementById('linked-again').addEventListener('click', () => this.handleFindMatch());
+        document.getElementById('btn-linked-next').addEventListener('click', () => this.setState(this.StateModeSelect));
+        document.getElementById('btn-linked-start').addEventListener('click', () => this.linked && this.linked.startMatch());
+        document.getElementById('btn-linked-speed').addEventListener('click', () => this.linked && this.linked.setRow(0));
+        document.getElementById('btn-linked-round').addEventListener('click', () => this.linked && this.linked.setRow(1));
     }
 
     // Hide all screens
@@ -237,12 +254,21 @@ class OnlineTetris {
                 break;
             case this.StateModeSelect:
                 this.showScreen('screen-mode-select');
+                document.getElementById('reinit-gameboy').style.display = this.linked && this.linked.emulator ? 'none' : 'block';
                 break;
             case this.StateMatchmaking:
                 this.showScreen('screen-matchmaking');
                 break;
             case this.StateOpponentDisconnect:
                 this.showScreen('screen-opponent-disconnect');
+                break;
+            case this.StateLinkedSetup:
+                this.showScreen('screen-linked-setup');
+                if (this.linked) this.linked.render();
+                break;
+            case this.StateLinked:
+                this.showScreen('screen-linked');
+                if (this.linked) this.linked.render();
                 break;
             default:
                 console.error("Invalid state:", this.currentState);
@@ -374,6 +400,7 @@ class OnlineTetris {
     // Connection handling
     handleConnectClick(kind = 'usb') {
         this.serial = (kind === 'serial') ? new SerialWS() : new Serial();
+        this.gameKind = 'tetris';
         this.setState(this.StateConnecting);
 
         this.serial.getDevice().then(() => {
@@ -417,8 +444,17 @@ class OnlineTetris {
     // A game is running in the emulator (or was just reset): link to it like a newly connected Game Boy.
     // Tetris DX links differently; js/dx/TetrisDxSerial.js makes it look like the original.
     handleEmulatorStart(serial, info) {
+        if (info.link) {
+            this.startLinked(serial, info);
+            return;
+        }
+        if (this.linked) {
+            this.linked.dispose();
+            this.linked = null;
+        }
         if (this.serial && this.serial.host) this.serial.close();
         this.hasPlayedBefore = false;
+        this.gameKind = info.dx ? 'dx' : 'tetris';
         document.getElementById('connecting-dx').style.display = info.dx ? 'block' : 'none';
         document.getElementById('connecting-gb').style.display = info.dx ? 'none' : 'block';
         const linked = (transport) => {
@@ -435,7 +471,38 @@ class OnlineTetris {
         });
     }
 
+    // Games played in their own 2-player mode: the page plays player 1 for this Game Boy
+    // against another player's (js/link/LinkedGame.js)
+    startLinked(serial, info) {
+        if (this.linked && this.linked.kind === info.link && this.linked.serial === serial) {
+            // Reset: the lobby stays, a match in progress ends and the setup starts again
+            this.linked.restarted();
+            if (!this.linked.gb) this.setState(this.StateLinkedSetup);
+            return;
+        }
+        this.handshakeRun++;
+        this.stopSerialPump();
+        if (this.serial && this.serial.host && this.serial !== serial) this.serial.close();
+        this.serial = serial;
+        if (this.gb) {
+            this.gb._closedByUs = true;
+            this.gb.ws.close();
+            this.gb = null;
+        }
+        if (this.linked) this.linked.dispose();
+        this.linked = null;
+        const emulator = this.emulator && serial === this.emulator.serial ? this.emulator.emulator : null;
+        import('./link/LinkedGame.js').then(({ LinkedGame }) => {
+            this.linked = new LinkedGame(this, serial, info, emulator);
+            this.setState(this.StateLinkedSetup);
+        });
+    }
+
     handleEmulatorClose() {
+        if (this.linked) {
+            this.linked.dispose();
+            this.linked = null;
+        }
         this.handshakeRun++;
         this.stopSerialPump();
         if (this.serial && this.serial.host) this.serial.close();
@@ -451,6 +518,20 @@ class OnlineTetris {
         this.serial.sendHex("29");
         this.serial.readHex(64).then(result => {
             if (run !== this.handshakeRun) return;
+            // Tetris Blast waits on its title with 0x81, Tetris 2 with 0xFD
+            const linked = { '81': { title: 'Tetris Blast', link: 'blast' }, 'fd': { title: 'Tetris 2', link: 'tetris2' } }[result.toLowerCase()];
+            if (linked) {
+                console.log(`${linked.title} found`);
+                this.startLinked(this.serial, linked);
+                return;
+            }
+            // Tetris DX, Tetris Attack and Tetris Plus answer 0xDD. Their Game Boys also drive the clock,
+            // which the adapter can't answer.
+            if (result.toLowerCase() === 'dd') {
+                document.getElementById('error-message').textContent = "This game isn't supported on this site yet.";
+                this.setState(this.StateError);
+                return;
+            }
             if (result === "55") {
                 console.log("SUCCESS!");
                 this.setState(this.StateSelectMusic);
@@ -505,10 +586,14 @@ class OnlineTetris {
     // Mode selection handlers
     handleFindMatch() {
         console.log("Find Match clicked");
+        if (this.linked) {
+            this.linked.findMatch(document.getElementById('username')?.value || this.generateName());
+            return;
+        }
         this.isMatchmaking = true;
         this.name = document.getElementById('username')?.value || this.generateName();
         this.setState(this.StateMatchmaking);
-        this.gb = GBWebsocket.findMatch(this.name);
+        this.gb = GBWebsocket.findMatch(this.name, this.gameKind);
         this.setGbCallbacks();
     }
 
@@ -520,6 +605,11 @@ class OnlineTetris {
 
     handleCancelMatchmaking() {
         console.log("Cancel matchmaking");
+        if (this.linked) {
+            this.linked.close();
+            this.setState(this.StateModeSelect);
+            return;
+        }
         if (this.gb) {
             this.gb.cancelMatchmaking();
             this.gb = null;
@@ -554,6 +644,10 @@ class OnlineTetris {
 
     handleReinitGameboy() {
         console.log("Reconnecting Game Boy");
+        if (this.linked) {
+            this.linked.dispose();
+            this.linked = null;
+        }
         this.hasPlayedBefore = false;
         this.setState(this.StateConnectingTetris);
         this.attemptTetrisConnection();
@@ -595,10 +689,14 @@ class OnlineTetris {
     handleCreateGame(name) {
         console.log("Create new game");
         console.log(name);
+        if (this.linked) {
+            this.linked.create(name);
+            return;
+        }
         this.isAdmin = true;
         this.name = name;
         this.setState(this.StateJoiningGame);
-        this.gb = GBWebsocket.initiateGame(name);
+        this.gb = GBWebsocket.initiateGame(name, this.gameKind);
         this.setGbCallbacks();
     }
 
@@ -613,11 +711,15 @@ class OnlineTetris {
         console.log("Join game");
         console.log(name);
         console.log(gameCode);
+        if (this.linked) {
+            this.linked.join(name, gameCode);
+            return;
+        }
         this.isAdmin = false;
         this.name = name;
         this.gameCode = gameCode;
         this.setState(this.StateJoiningGame);
-        this.gb = GBWebsocket.joinGame(name, gameCode);
+        this.gb = GBWebsocket.joinGame(name, gameCode, this.gameKind);
         this.setGbCallbacks();
     }
 
@@ -685,7 +787,7 @@ class OnlineTetris {
     gbError(gb, errorMsg) {
         console.error("Game error:", errorMsg);
         // If lobby not found, show a friendly message and return to join screen
-        if (errorMsg === "Game not found." || errorMsg === "Cannot join game") {
+        if (errorMsg === "Game not found." || errorMsg === "Cannot join game" || errorMsg === "Wrong game.") {
             if (this.gb) {
                 this.gb._closedByUs = true;
                 this.gb.ws.close();
@@ -694,7 +796,9 @@ class OnlineTetris {
             this.setState(this.StateSelectHandicap);
             var joinError = document.getElementById('join-error');
             if (joinError) {
-                joinError.textContent = 'Lobby not found. Please check the code and try again.';
+                joinError.textContent = errorMsg === "Wrong game."
+                    ? 'That lobby plays another game.'
+                    : 'Lobby not found. Please check the code and try again.';
                 joinError.style.display = 'block';
             }
             return;
@@ -763,7 +867,7 @@ class OnlineTetris {
         // Auto-reconnect for matchmaking
         const reconnect = () => {
             this.setState(this.StateMatchmaking);
-            this.gb = GBWebsocket.findMatch(this.name);
+            this.gb = GBWebsocket.findMatch(this.name, this.gameKind);
             this.setGbCallbacks();
         };
 
@@ -1133,10 +1237,16 @@ class OnlineTetris {
     }
 }
 
-// Tetris (World and Japan) and Tetris DX from the ROM header
+// Identifies the game from the ROM header. link: the game's id in js/link/;
+// model: the Game Boy model to run it as
 function identifyTetris(rom) {
     const title = String.fromCharCode(...rom.subarray(0x134, 0x144)).replace(/\0+$/, '');
     if (title.startsWith('TETRIS DX')) return { title: 'Tetris DX', dx: true };
+    if (title === 'TETRIS ATTACK') return { title: 'Tetris Attack', link: 'attack' };
+    if (title === 'TETRIS PLUS') return { title: 'Tetris Plus', link: 'plus' };
+    if (title === 'TETRIS2') return { title: 'Tetris 2', link: 'tetris2' };
+    // Runs as a Game Boy Color: on a Super Game Boy, which has no link port, the game offers no link play
+    if (title === 'TETRIS BLAST') return { title: 'Tetris Blast', link: 'blast', model: 2 };
     if (title !== 'TETRIS') return null;
     const checksum = (rom[0x14E] << 8) | rom[0x14F];
     return { title: checksum === 0x89B5 ? 'Tetris (Japan)' : 'Tetris' };
