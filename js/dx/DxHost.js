@@ -9,7 +9,9 @@
  *   round       host 01 -> guest 04 (first round, answered with 04) or 03, then
  *               [seed, 0A] -> [_, 0B], [_, 0C] -> [_, 0D] and the round is on
  *   in a round  [n, _, _] n garbage lines; [_, 80 | height, _]; [_, _, 01] topped
- *               out, answered [_, _, 02]
+ *               out, answered [_, _, 02]; [_, _, 81] paused, answered [_, _, 82]
+ *               (the other pauses too), [_, _, 83] going on: only the side that
+ *               paused can go on
  *   after it    each side [_, 33, _] once its result screen is passed; after a
  *               match (3 wins) the guest picks the music again and says 0E,
  *               answered 0F
@@ -174,6 +176,8 @@ export class DxHost {
                 if (this.events.onToppedOut) this.events.onToppedOut();
             } else if (m2 === 2) {
                 this._go('result');
+            } else if (m2 === 0x81) {
+                this.link.send(0, 0, 0x82);
             }
         }
     }

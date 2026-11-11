@@ -52,6 +52,8 @@ class OnlineTetris {
         this.gb = null;
         this.emulator = null; // in-page Game Boy (js/emulator/EmulatorPanel.js), once opened
         this.linked = null; // Tetris Blast, Tetris 2 etc. instead of Tetris (js/link/LinkedGame.js)
+        this.transport = null; // the adapter itself while Tetris DX talks through js/dx/TetrisDxSerial.js
+        this.finding = null; // the adapter's hybrid mode while the page finds out which game linked
         this.gameKind = 'tetris'; // sent to the server: 'tetris', or 'dx' for Tetris DX
         this.handshakeRun = 0;
 
@@ -453,6 +455,7 @@ class OnlineTetris {
             this.linked = null;
         }
         if (this.serial && this.serial.host) this.serial.close();
+        this.transport = null;
         this.hasPlayedBefore = false;
         this.gameKind = info.dx ? 'dx' : 'tetris';
         document.getElementById('connecting-dx').style.display = info.dx ? 'block' : 'none';
@@ -483,6 +486,7 @@ class OnlineTetris {
         this.handshakeRun++;
         this.stopSerialPump();
         if (this.serial && this.serial.host && this.serial !== serial) this.serial.close();
+        this.transport = null;
         this.serial = serial;
         if (this.gb) {
             this.gb._closedByUs = true;
@@ -506,6 +510,7 @@ class OnlineTetris {
         this.handshakeRun++;
         this.stopSerialPump();
         if (this.serial && this.serial.host) this.serial.close();
+        this.transport = null;
         this.serial = null;
         this.setState(this.StateConnect);
     }
@@ -525,11 +530,8 @@ class OnlineTetris {
                 this.startLinked(this.serial, linked);
                 return;
             }
-            // Tetris DX, Tetris Attack and Tetris Plus answer 0xDD. Their Game Boys also drive the clock,
-            // which the adapter can't answer.
             if (result.toLowerCase() === 'dd') {
-                document.getElementById('error-message').textContent = "This game isn't supported on this site yet.";
-                this.setState(this.StateError);
+                this.startHybridGame(run);
                 return;
             }
             if (result === "55") {
@@ -551,6 +553,59 @@ class OnlineTetris {
                 console.log("ERROR");
                 console.log(error);
             });
+    }
+
+    // Tetris DX, Tetris Attack and Tetris Plus answer 0xDD. Their Game Boys drive the clock too,
+    // which the adapter answers in its hybrid mode (js/link/HybridAdapter.js)
+    async startHybridGame(run) {
+        const serial = this.serial;
+        const { HybridAdapter, HYBRID_FIRMWARE, identify } = await import('./link/HybridAdapter.js');
+        if (run !== this.handshakeRun) return;
+        if (!serial.firmwareAtLeast || !serial.firmwareAtLeast(...HYBRID_FIRMWARE)) {
+            const have = serial.firmwareVersion ? ` This adapter has ${serial.firmwareVersion.join('.')}.` : '';
+            document.getElementById('error-message').textContent =
+                `Tetris DX, Tetris Attack and Tetris Plus need GB-Link firmware ${HYBRID_FIRMWARE.join('.')} or newer.${have}`;
+            this.setState(this.StateError);
+            return;
+        }
+        const adapter = new HybridAdapter(serial);
+        this.finding = adapter;
+        let found = null;
+        while (!found && run === this.handshakeRun && !adapter.dead) {
+            if (await adapter.link()) found = await identify(adapter);
+            else await new Promise((resolve) => setTimeout(resolve, 1000 / 60));
+        }
+        if (this.finding === adapter) this.finding = null;
+        if (!found || run !== this.handshakeRun) {
+            await adapter.dispose();
+            if (run === this.handshakeRun) {
+                document.getElementById('error-message').textContent = 'Cannot connect to GB Link Cable Adapter. Please reconnect it to the PC.';
+                this.setState(this.StateError);
+            }
+            return;
+        }
+        if (found.game !== 'dx') {
+            this.startLinked(serial, { title: found.game === 'attack' ? 'Tetris Attack' : 'Tetris Plus', link: found.game, adapter });
+            return;
+        }
+        const { TetrisDxSerial } = await import('./dx/TetrisDxSerial.js');
+        this.transport = serial;
+        this.gameKind = 'dx';
+        this.showDxNote(true);
+        this.serial = new TetrisDxSerial(null, { adapter, hello: found.hello, onPrompt: (show) => this.showGameBoyPrompt(show) });
+        this.attemptTetrisConnection();
+    }
+
+    showDxNote(dx) {
+        document.getElementById('connecting-dx').style.display = dx ? 'block' : 'none';
+        document.getElementById('connecting-gb').style.display = dx ? 'none' : 'block';
+    }
+
+    // Tetris DX on the adapter waits for its player's A before each round
+    showGameBoyPrompt(show) {
+        const prompt = document.getElementById('gb-prompt');
+        prompt.textContent = 'Press A on your Game Boy to start the round.';
+        prompt.style.display = show ? 'block' : 'none';
     }
 
     // Music selection
@@ -644,13 +699,28 @@ class OnlineTetris {
 
     handleReinitGameboy() {
         console.log("Reconnecting Game Boy");
+        const freed = [];
+        if (this.finding) {
+            freed.push(this.finding.dispose());
+            this.finding = null;
+        }
         if (this.linked) {
-            this.linked.dispose();
+            freed.push(this.linked.dispose());
             this.linked = null;
+        }
+        // Tetris DX on the adapter: ask the adapter itself again, the game may have changed
+        if (this.transport) {
+            freed.push(this.serial.close());
+            this.serial = this.transport;
+            this.transport = null;
+            this.showDxNote(false);
         }
         this.hasPlayedBefore = false;
         this.setState(this.StateConnectingTetris);
-        this.attemptTetrisConnection();
+        const run = ++this.handshakeRun;
+        Promise.all(freed).then(() => {
+            if (run === this.handshakeRun) this.attemptTetrisConnection(run);
+        });
     }
 
     handleBackToMenu() {

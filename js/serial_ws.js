@@ -25,6 +25,7 @@ const SERIAL_WS_MAX_PAYLOAD = 64;
 const SERIAL_WS_GBL_CMD = {
     SET_MODE: 0x00,
     CANCEL: 0x01,
+    GET_FIRMWARE_INFO: 0x0F,
     SET_VOLTAGE_3V3: 0x40,
     SET_VOLTAGE_5V: 0x41,
     SET_LED_COLOR: 0x42,
@@ -59,7 +60,8 @@ class SerialWS {
 
     static requestPort() {
         return navigator.serial.requestPort({
-            filters: [{ usbVendorId: 0x2FE3 }]
+            // GBLink firmware before 3.0.0, then 3.0.0 and newer
+            filters: [{ usbVendorId: 0x2FE3 }, { usbVendorId: 0x1209, usbProductId: 0xB011 }]
         });
     }
 
@@ -78,6 +80,7 @@ class SerialWS {
             ]));
             await this._sendCommand(new Uint8Array([SERIAL_WS_GBL_CMD.SET_VOLTAGE_5V]));
             await new Promise(r => setTimeout(r, 500));
+            await this._readFirmwareInfo();
 
             this.ready = true;
             console.log('Ready!');
@@ -183,6 +186,41 @@ class SerialWS {
         });
     }
 
+    // The firmware's version, [major, minor, patch] (null if it didn't say). It answers on the
+    // data channel.
+    async _readFirmwareInfo() {
+        this.firmwareVersion = null;
+        this._dataQueue = [];
+        try {
+            await this._sendCommand(new Uint8Array([SERIAL_WS_GBL_CMD.GET_FIRMWARE_INFO]));
+            const info = await this._awaitData(1000);
+            if (info.length >= 4 && info[0] === SERIAL_WS_GBL_CMD.GET_FIRMWARE_INFO) this.firmwareVersion = [info[1], info[2], info[3]];
+        } catch (e) {
+            console.warn('No firmware info:', e);
+        }
+    }
+
+    firmwareAtLeast(major, minor, patch) {
+        const have = this.firmwareVersion;
+        if (!have) return false;
+        const want = [major, minor, patch];
+        for (let i = 0; i < 3; i++) if (have[i] !== want[i]) return have[i] > want[i];
+        return true;
+    }
+
+    /** The adapter's next data frame, however long it takes (cancelReads() ends the wait). */
+    readData() {
+        return this._awaitData(0);
+    }
+
+    cancelReads() {
+        for (const waiter of this._dataWaiters.splice(0)) waiter.reject('cancelled');
+    }
+
+    flushReads() {
+        this._dataQueue = [];
+    }
+
     // --- Legacy Serial API (matches js/serial.js) ---
 
     async setLed(r, g, b, on = true) {
@@ -227,6 +265,11 @@ class SerialWS {
 
     send(data) {
         return this._writeFrame(SERIAL_WS_CH_DATA, data);
+    }
+
+    /** A command for the firmware. */
+    sendCommand(bytes) {
+        return this._sendCommand(new Uint8Array(bytes));
     }
 
     clearBuffer() {

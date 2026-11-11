@@ -1,6 +1,7 @@
 /**
  * Tetris Plus link host. The player's Game Boy runs as player 2 and this page
- * plays player 1 for it, through the emulator's link port (see PacketHost.js).
+ * plays player 1 for it, through a byte link (ByteLink.js) to the emulator or the
+ * adapter (see PacketHost.js).
  *
  * Link: when the Game Boy listens with 0xDD (it does on every screen while not
  * linked) player 1 clocks 0xFE; the game jumps to VS mode. After power-on the
@@ -43,8 +44,8 @@
  * network delay.
  */
 import { PacketHost } from './PacketHost.js';
+import { PortByteLink, AdapterByteLink } from './ByteLink.js';
 
-const LINK = 0xFE;
 const ON_TITLE = 0xDD;
 const MATCH_SIZE = 0x81;
 const WINS = 2;
@@ -76,6 +77,8 @@ const SHOW_FRAMES = 60;
 const PING_FRAMES = 300;
 // Frames to wait for the game's title after 0xFF before sending it again
 const QUIT_FRAMES = 240;
+// Adapter: page frames keep the time once the Game Boy took no turn for this long
+const STALL_MS = 40;
 
 export class PlusHost extends PacketHost {
     constructor({ send, onEvent = () => {} }) {
@@ -164,10 +167,34 @@ export class PlusHost extends PacketHost {
     }
 
     attach(port) {
-        this.port = port;
-        this._unlink();
+        const partner = super.attach(port);
         this.linkAt = this.frames + START_FRAMES;
-        return { step: () => this.step(), frame: () => this.frame() };
+        return partner;
+    }
+
+    useAdapter(adapter) {
+        super.useAdapter(adapter);
+        // The Game Boy takes its turn once a frame, so its exchanges keep the time
+        this.link.onPair = () => this.frame();
+        this.linkAt = this.frames;
+    }
+
+    tick() {
+        if (performance.now() - this.link.lastPairAt > STALL_MS) this.frame();
+    }
+
+    _portLink(port) {
+        return new PortByteLink(port);
+    }
+
+    _adapterLink(adapter) {
+        return new AdapterByteLink(adapter);
+    }
+
+    _useLink(link) {
+        this.link = link;
+        link.onReply = (out, reply) => this._reply(out, reply);
+        link.onClocked = (byte) => this._clocked(byte);
     }
 
     frame() {
@@ -183,7 +210,7 @@ export class PlusHost extends PacketHost {
                     return;
                 }
             }
-            if (this.frames >= this.linkAt && this.port.listening() === ON_TITLE && this.port.exchange(LINK, 0) === ON_TITLE) this._linked();
+            if (this.frames >= this.linkAt && this.link.tryLink()) this._linked();
             return;
         }
         if (++this.quiet > LOST_FRAMES) {
@@ -193,14 +220,16 @@ export class PlusHost extends PacketHost {
         this._clock();
     }
 
-    // The Game Boy's turn: it clocked the byte we left for it (always 0x00)
     step() {
-        const bytes = this.port.takeMaster();
-        if (this.phase === 'link' || !bytes.length) return;
+        this.link.step();
+    }
+
+    // The Game Boy's turn: it clocked the byte we left for it (always 0x00)
+    _clocked(byte) {
+        if (this.phase === 'link') return;
         this.ourTurn = true;
         this.quiet = 0;
-        if (this.phase === 'quit') return;
-        for (const byte of bytes) this._got(byte);
+        if (this.phase !== 'quit') this._got(byte);
     }
 
     // ---- Link ----
@@ -218,7 +247,7 @@ export class PlusHost extends PacketHost {
     _unlink() {
         this._reset();
         this.quitByte = false;
-        if (this.port) this.port.setFollower(-1);
+        if (this.link) this.link.unlink();
     }
 
     _linked() {
@@ -226,7 +255,6 @@ export class PlusHost extends PacketHost {
         this.quitByte = false;
         this.ourTurn = true;
         this.quiet = 0;
-        this.port.setFollower(0);
         this._setPlaying(false);
         this._phase('size');
     }
@@ -254,13 +282,16 @@ export class PlusHost extends PacketHost {
     _clock() {
         if (!this.ourTurn) return;
         const out = this.pending !== null ? this.pending : this._out();
-        const reply = this.port.exchange(out);
-        if (reply === null) {
-            this.pending = out;
-            return;
-        }
         this.pending = null;
         this.ourTurn = false;
+        if (!this.link.clock(out)) {
+            this.pending = out;
+            this.ourTurn = true;
+        }
+    }
+
+    // The Game Boy's byte on our clock
+    _reply(out, reply) {
         this.quiet = 0;
         if (out === QUIT) {
             // The game leaves VS mode; it listens on its title soon after

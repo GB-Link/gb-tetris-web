@@ -42,13 +42,11 @@
  * Game Boy; { t: 'board', m, n, v } the leader's 13 rows for round n of match m;
  * { t: 'quit' } their Game Boy left a match before it began.
  *
- * attach(port) returns the emulator's link partner for its linkPort(): step()
- * runs after every slice of emulation, frame() once a frame.
+ * The link goes through a packet link (PacketLink.js), to the emulator or to the adapter.
  */
 import { PacketHost } from './PacketHost.js';
+import { PortPacketLink, AdapterPacketLink } from './PacketLink.js';
 
-const LINK = 0xFE;
-const ON_TITLE = 0xDD;
 // Frames without a reply before linking again (the Game Boy went back to its title)
 const LOST_FRAMES = 60;
 const READY = [0x01, 0x00, 0x02];
@@ -157,7 +155,7 @@ export class AttackHost extends PacketHost {
     frame() {
         this.frames++;
         if (!this.linked) {
-            if (this.port.listening() === ON_TITLE && this.port.exchange(LINK, 0) === ON_TITLE) this._linked();
+            if (this.link.tryLink()) this._linked();
             return;
         }
         if (++this.quiet > LOST_FRAMES) {
@@ -169,7 +167,22 @@ export class AttackHost extends PacketHost {
     }
 
     step() {
-        if (this.linked) this._step();
+        if (this.linked) this.link.step();
+    }
+
+    _portLink(port) {
+        return new PortPacketLink(port);
+    }
+
+    _adapterLink(adapter) {
+        return new AdapterPacketLink(adapter);
+    }
+
+    _useLink(link) {
+        this.link = link;
+        link.onPacket = (bytes) => this._finish(bytes);
+        // The Game Boy answered from its title: it left the game
+        link.onTitle = () => this._lost();
     }
 
     // ---- State ----
@@ -181,7 +194,6 @@ export class AttackHost extends PacketHost {
         this.p2Ready = false;
         this.stage = 0;
         this.forfeit = false;
-        this.packet = null;
         this.toGb = [];
         this.rowsOut = [];
         this.rows = [];
@@ -216,7 +228,6 @@ export class AttackHost extends PacketHost {
     _linked() {
         this.linked = true;
         this.quiet = 0;
-        this.port.setFollower(0);
         this._reset('level');
         this._update();
     }
@@ -231,8 +242,7 @@ export class AttackHost extends PacketHost {
     }
 
     _unlink() {
-        this.packet = null;
-        if (this.port) this.port.setFollower(-1);
+        if (this.link) this.link.unlink();
     }
 
     _sayReady() {
@@ -494,40 +504,13 @@ export class AttackHost extends PacketHost {
 
     // One packet per frame
     _frame() {
-        if (this.packet) return;
-        this.packet = { out: [0, ...(this._next() || [0, 0, 0])], in: [], index: 0 };
-        this._clock();
+        if (this.link.busy) return;
+        this.link.start([0, ...(this._next() || [0, 0, 0])]);
     }
 
-    _step() {
-        for (const byte of this.port.takeMaster()) {
-            const p = this.packet;
-            if (!p || (p.index !== 1 && p.index !== 3)) continue;
-            p.in[p.index++] = byte;
-            if (p.index === 4) this._finish();
-        }
-        const p = this.packet;
-        if (p && (p.index === 0 || p.index === 2)) this._clock();
-    }
-
-    _clock() {
-        const p = this.packet;
-        const reply = this.port.exchange(p.out[p.index]);
-        if (reply === null) return;
-        // Byte 0 is always 0 from a linked Game Boy; 0xDD: it is back on its title
-        if (p.index === 0 && reply === ON_TITLE) {
-            this._lost();
-            return;
-        }
-        p.in[p.index++] = reply;
-        this.port.setFollower(p.out[p.index]);
-    }
-
-    _finish() {
-        const message = this.packet.in.slice(1);
-        this.packet = null;
+    _finish(bytes) {
+        const message = bytes.slice(1);
         this.quiet = 0;
-        this.port.setFollower(0);
         if (message.some((b) => b)) this._got(message);
     }
 }

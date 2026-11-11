@@ -71,13 +71,16 @@ const $ = (id) => document.getElementById(id);
 export class LinkedGame {
     /**
      * app: the page (js/app.js). serial: the link to the Game Boy (adapter or
-     * emulator). info: from identifyTetris(). emulator: the GameBoyEmulator when
-     * the game runs in the page, which is then clocked in step with its frames.
+     * emulator). info: from identifyTetris(), or from the adapter's handshake with
+     * info.adapter, a HybridAdapter (HybridAdapter.js) linked with the game.
+     * emulator: the GameBoyEmulator when the game runs in the page, which is then
+     * clocked in step with its frames.
      */
     constructor(app, serial, info, emulator = null) {
         this.app = app;
         this.serial = serial;
         this.emulator = emulator;
+        this.adapter = info.adapter || null;
         this.kind = info.link;
         this.title = TITLES[this.kind];
         this.gb = null;
@@ -130,9 +133,10 @@ export class LinkedGame {
         this.left = null;
     }
 
+    /** Resolves once the adapter is free for others. */
     dispose() {
         this.close();
-        this._stop();
+        return this._stop();
     }
 
     open(gb, matchmaking) {
@@ -235,8 +239,16 @@ export class LinkedGame {
         this.host = host;
         this.running = true;
         if (host.attach) {
-            // The game drives the clock too, so the host becomes the emulator's link partner
-            if (this.emulator) this.emulator.setLinkPartner(host.attach(this.emulator.linkPort()));
+            // The game drives the clock too: the host becomes the emulator's link partner, or
+            // works the adapter's hybrid mode, with this page's frames
+            if (this.emulator) {
+                this.emulator.setLinkPartner(host.attach(this.emulator.linkPort()));
+            } else {
+                host.useAdapter(this.adapter);
+                this._ticker = setInterval(() => {
+                    if (this.running && this.host === host) host.tick();
+                }, 1000 / 60);
+            }
         } else if (this.emulator) {
             const port = this.emulator.linkPort();
             this.emulator.setLinkPartner({
@@ -255,7 +267,9 @@ export class LinkedGame {
         this.running = false;
         this.host = null;
         clearTimeout(this._autoTimer);
+        clearInterval(this._ticker);
         if (this.emulator) this.emulator.setLinkPartner(null);
+        return this.adapter ? this.adapter.dispose() : Promise.resolve();
     }
 
     // Adapter: one byte per frame to the Game Boy, its reply back to the host

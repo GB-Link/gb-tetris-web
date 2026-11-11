@@ -63,6 +63,7 @@ function buildLedPacket(r, g, b, on) {
 const GBL_CMD = {
     SET_MODE: 0x00,
     CANCEL: 0x01,
+    GET_FIRMWARE_INFO: 0x0F,
     SET_VOLTAGE_3V3: 0x40,
     SET_VOLTAGE_5V: 0x41,
     SET_LED_COLOR: 0x42,
@@ -112,7 +113,8 @@ class Serial {
         const filters = [
             { 'vendorId': 0x239A }, // Adafruit boards
             { 'vendorId': 0xcafe }, // TinyUSB (old reconfigurable firmware)
-            { 'vendorId': 0x2FE3 }, // Zephyr default (new GBLink firmware)
+            { 'vendorId': 0x2FE3 }, // GBLink firmware before 3.0.0
+            { 'vendorId': 0x1209, 'productId': 0xB011 }, // GBLink firmware 3.0.0 and newer
         ];
         return navigator.usb.requestDevice({ 'filters': filters }).then(
             device => {
@@ -122,7 +124,8 @@ class Serial {
     }
 
     getEndpoints(interfaces) {
-        this.isNewFirmware = (this.device.vendorId === 0x2FE3);
+        this.isNewFirmware = this.device.vendorId === 0x2FE3
+            || (this.device.vendorId === 0x1209 && this.device.productId === 0xB011);
 
         interfaces.forEach(element => {
             var alternates = element.alternates;
@@ -220,7 +223,7 @@ class Serial {
                     }).then(() => {
                         // Wait for firmware to initialize GB Link mode (PIO, data handler)
                         return new Promise(resolve => setTimeout(resolve, 500));
-                    });
+                    }).then(() => this._readFirmwareInfo());
                 } else {
                     // Old firmware: CDC handshake + voltage switch via magic packet
                     console.log("Control Transfer Out");
@@ -252,7 +255,92 @@ class Serial {
         });
     }
 
+    // The firmware's version, [major, minor, patch] (null if it didn't say)
+    async _readFirmwareInfo() {
+        this.firmwareVersion = null;
+        try {
+            await this.device.transferOut(this.cmdEpOut, new Uint8Array([GBL_CMD.GET_FIRMWARE_INFO]));
+            const result = await Promise.race([
+                this.device.transferIn(this.epIn, 64),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1000)),
+            ]);
+            const info = new Uint8Array(result.data.buffer, result.data.byteOffset, result.data.byteLength);
+            if (info.length >= 4 && info[0] === GBL_CMD.GET_FIRMWARE_INFO) this.firmwareVersion = [info[1], info[2], info[3]];
+        } catch (e) {
+            console.warn('No firmware info:', e);
+        }
+    }
+
+    firmwareAtLeast(major, minor, patch) {
+        const have = this.firmwareVersion;
+        if (!have) return false;
+        const want = [major, minor, patch];
+        for (let i = 0; i < 3; i++) if (have[i] !== want[i]) return have[i] > want[i];
+        return true;
+    }
+
+    // From the first readData() on, one transfer always waits for the adapter's data, which
+    // queues here; read() then takes from the same queue. Unlike a read of its own, a wait that
+    // ends leaves no transfer behind to swallow a later answer.
+    _startReading() {
+        if (this._reading) return;
+        this._reading = true;
+        this._queue = [];
+        this._waiters = [];
+        (async () => {
+            while (this._reading) {
+                let result;
+                try {
+                    result = await this.device.transferIn(this.epIn, 64);
+                } catch (e) {
+                    this._reading = false;
+                    for (const waiter of this._waiters.splice(0)) waiter.reject(e);
+                    return;
+                }
+                if (!result.data || !result.data.byteLength) continue;
+                const bytes = new Uint8Array(result.data.buffer.slice(result.data.byteOffset, result.data.byteOffset + result.data.byteLength));
+                const waiter = this._waiters.shift();
+                if (waiter) waiter.resolve(bytes);
+                else this._queue.push(bytes);
+            }
+        })();
+    }
+
+    _awaitData(timeoutMs) {
+        if (this._queue.length) return Promise.resolve(this._queue.shift());
+        return new Promise((resolve, reject) => {
+            const waiter = { resolve, reject };
+            this._waiters.push(waiter);
+            if (timeoutMs > 0) {
+                setTimeout(() => {
+                    const i = this._waiters.indexOf(waiter);
+                    if (i !== -1) {
+                        this._waiters.splice(i, 1);
+                        reject('Cannot connect to GB Link Cable Adapter. Please reconnect it to the PC.');
+                    }
+                }, timeoutMs);
+            }
+        });
+    }
+
+    /** The adapter's next data packet, however long it takes (cancelReads() ends the wait). */
+    readData() {
+        this._startReading();
+        return this._awaitData(0);
+    }
+
+    cancelReads() {
+        if (this._waiters) for (const waiter of this._waiters.splice(0)) waiter.reject('cancelled');
+    }
+
+    flushReads() {
+        if (this._queue) this._queue = [];
+    }
+
     read(num) {
+        if (this._reading) {
+            return this._awaitData(2000).then((bytes) => ({ data: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength) }));
+        }
         return new Promise((resolve, reject) => {
             setTimeout(function () {
                 reject('Cannot connect to GB Link Cable Adapter. Please reconnect it to the PC.');
@@ -304,6 +392,11 @@ class Serial {
 
     send(data) {
         return this.device.transferOut(this.epOut, data);
+    }
+
+    /** A command for the firmware (GBLink firmware only). */
+    sendCommand(bytes) {
+        return this.device.transferOut(this.cmdEpOut, new Uint8Array(bytes));
     }
 
     // Clear the buffer - used for priority commands that need to be sent immediately

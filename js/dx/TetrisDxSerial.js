@@ -1,8 +1,8 @@
 /**
- * Tetris DX in the in-page emulator, as a link transport that speaks the
- * original Tetris protocol to the site (the same API as js/serial.js): the
- * page's game logic sees an original Tetris Game Boy, while this plays the host
- * of a DX 2-player game against the emulated Game Boy (DxHost over DxLink).
+ * Tetris DX, in the in-page emulator or on the adapter, as a link transport that
+ * speaks the original Tetris protocol to the site (the same API as js/serial.js):
+ * the page's game logic sees an original Tetris Game Boy, while this plays the
+ * host of a DX 2-player game against the player's Game Boy (DxHost over DxLink).
  *
  * What the site sends, and what this does with it:
  *   29          handshake; answered 55 once the Game Boy is past its player data
@@ -16,6 +16,7 @@
  */
 import { DxLink } from './DxLink.js';
 import { DxHost } from './DxHost.js';
+import { AdapterPacketLink } from '../link/PacketLink.js';
 
 const REPLY_DELAY_MS = 2;
 // After 60: [02 02 02 79 60] 29, 100 garbage, 29, 256 pieces, 30 00 02 02 20
@@ -25,9 +26,17 @@ const PIECES_AT = 1 + 100 + 1;
 const fromHexString = (hex) => new Uint8Array(hex.match(/.{1,2}/g).map((b) => parseInt(b, 16)));
 
 export class TetrisDxSerial {
-    /** emulator: the running GameBoyEmulator; name: shown as the opponent on the Game Boy */
-    constructor(emulator, { name } = {}) {
+    /**
+     * emulator: the running GameBoyEmulator, or null for a Game Boy on the adapter, given as
+     * adapter: a HybridAdapter (js/link/HybridAdapter.js) linked with it; hello: the message it
+     * said on linking. onPrompt(show): the Game Boy waits for its player's A, which the page
+     * presses itself in the emulator. name: shown as the opponent on the Game Boy.
+     */
+    constructor(emulator, { name, adapter = null, hello = null, onPrompt = () => {} } = {}) {
         this.emulator = emulator;
+        this.adapter = adapter;
+        this.onPrompt = onPrompt;
+        this.prompt = false;
         this.buffer = [];
         this.send_active = false;
         this.isNewFirmware = true;
@@ -39,33 +48,56 @@ export class TetrisDxSerial {
         this._start = [];
         this._music = 1;
         this._replies = [];
-        const port = emulator.linkPort();
-        this.link = new DxLink(port);
-        this.host = new DxHost(this.link, port.press, {
+        const port = emulator ? emulator.linkPort() : null;
+        this.link = new DxLink(port || new AdapterPacketLink(adapter));
+        this.host = new DxHost(this.link, port ? port.press : null, {
             name,
             onHeight: (rows) => { this._height = rows; },
             onAttack: (lines) => this._replies.push(0x80 + Math.min(lines, 5)),
             onToppedOut: () => this._replies.push(0xAA, 0xFF),
         });
         this._height = 0;
-        emulator.setLinkPartner({
-            step: () => this.link.step(),
-            frame: () => { this.link.frame(); this.host.frame(); },
-        });
+        if (emulator) {
+            emulator.setLinkPartner({
+                step: () => this.link.step(),
+                frame: () => { this.link.frame(); this.host.frame(); },
+            });
+            return;
+        }
+        // On the adapter the page keeps the time: a packet a frame
+        this._timer = setInterval(() => {
+            this.link.frame();
+            this.host.frame();
+            this._setPrompt(this.host.phase === 'starting');
+        }, 1000 / 60);
+        if (hello) this.link.onMessage(hello);
+    }
+
+    _setPrompt(show) {
+        if (show === this.prompt) return;
+        this.prompt = show;
+        this.onPrompt(show);
     }
 
     async getDevice() {
         this.ready = true;
     }
 
-    close(message = 'The emulator was closed.') {
+    /** Stops the link; resolves once the adapter is free for others. */
+    close(message = this.emulator ? 'The emulator was closed.' : 'The Game Boy link was closed.') {
         this.ready = false;
         this._closed = message;
         this.buffer = [];
         this._waiters = [];
         this._frames = [];
-        this.emulator.setLinkPartner(null);
-        this.emulator.setKeys('link', 0);
+        if (this.emulator) {
+            this.emulator.setLinkPartner(null);
+            this.emulator.setKeys('link', 0);
+            return Promise.resolve();
+        }
+        clearInterval(this._timer);
+        this._setPrompt(false);
+        return this.adapter.dispose();
     }
 
     _byte(b) {
@@ -141,7 +173,7 @@ export class TetrisDxSerial {
     send(data) {
         if (this._closed) return Promise.reject(this._closed);
         const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-        this.emulator.advance();
+        if (this.emulator) this.emulator.advance();
         const replies = bytes.map((b) => this._byte(b));
         setTimeout(() => this._push(replies), REPLY_DELAY_MS);
         return Promise.resolve();
